@@ -1,0 +1,277 @@
+name: Maestro e2e tests
+
+on:
+#  schedule:
+#    - cron: "0 3 * * *"
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform to test'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - android
+          - ios
+          - all
+
+env:
+  APP_NAME: "app-example"
+
+jobs:
+  test-ios:
+    if: ${{ github.event.inputs.platform == 'ios' || github.event.inputs.platform == 'all' || github.event.inputs.platform == null }}
+    runs-on: macos-15
+    strategy:
+      matrix:
+        device: [ "iPhone 16", "iPhone 16 Pro Max" ] # Only 16th generation devices are existing on macos-15 machine
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run iOS Simulator
+        run: |
+
+          echo "Available devices"
+          xcrun simctl list devices
+
+          echo "All valid available device types"
+          xcrun simctl list devicetypes
+
+          echo "All valid and available runtimes"
+          xcrun simctl list runtimes
+
+          echo "Finding UDID for ${{ matrix.device }}"
+          UDID=$(xcrun simctl list devices available | grep -E "${{ matrix.device }}" | grep -Eo '[A-F0-9\-]{36}' | head -1)
+
+          echo "Found UDID: $UDID"
+          echo "Run simulator"
+          xcrun simctl boot "$UDID"
+
+      - name: Install .app
+        run: xcrun simctl install booted ./${{ env.APP_NAME }}.app
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'adopt'
+
+      - name: Install Maestro
+        run: |
+          brew tap facebook/fb
+          brew install facebook/fb/idb-companion
+          curl -Ls 'https://get.maestro.mobile.dev' | bash
+          echo "$HOME/.maestro/bin" >> $GITHUB_PATH
+
+      - name: Run Maestro E2E tests
+        continue-on-error: true
+        run: |
+            echo "Running Maestro tests"
+            maestro test .maestro --format=junit --output="ios-report-${{ matrix.device }}.xml"
+            echo "Maestro tests completed"
+
+      - name: Add Device name to JUnit report
+        run: |
+          file="ios-report-${{ matrix.device }}.xml"
+          device="${{ matrix.device }}"
+
+          if [ ! -f "$file" ]; then
+            echo "Report file '$file' not found."
+            exit 0
+          fi
+
+          brew install xmlstarlet
+
+          # Add Device name in <testsuite name="...">
+          xmlstarlet ed -P -L \
+          -u "//testsuite/@name" \
+          -v "${device}" \
+          "$file"
+
+          # Add Device name in <testcase classname="...">
+          xmlstarlet ed -P -L \
+          -u "//testcase/@classname" \
+          -x "concat(., ' (${device})')" \
+          "$file"
+
+          # Check changes
+          echo "Updated XML report:"
+          cat "$file"
+
+      - name: Upload Maestro Test Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-report-${{ matrix.device }}
+          path: ios-report-${{ matrix.device }}.xml
+          retention-days: 1
+
+  test-android:
+    name: Test Android
+    if: ${{ github.event.inputs.platform == 'android' || github.event.inputs.platform == 'all' || github.event.inputs.platform == null}}
+    strategy:
+      matrix:
+        api-level: [ 26, 27, 28, 29, 30, 31, 32, 33, 34 ]
+
+        # We should use appropriate 'target' and 'arch' combinations with api-levels to exclude versions that sdkmanager does not support.
+        include:
+          - api-level: 26
+            target: google_apis
+            arch: x86_64
+          - api-level: 27
+            target: google_apis
+            arch: x86
+          - api-level: 28
+            target: google_apis
+            arch: x86_64
+          - api-level: 29
+            target: google_apis
+            arch: x86_64
+          - api-level: 30
+            target: google_apis
+            arch: x86_64
+          - api-level: 31
+            target: google_apis
+            arch: x86_64
+          - api-level: 32
+            target: google_apis
+            arch: x86_64
+          - api-level: 33
+            target: google_apis
+            arch: x86_64
+          - api-level: 34
+            target: google_apis
+            arch: x86_64
+
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'adopt'
+
+      - uses: dniHze/maestro-test-action@v1
+
+      - name: Set up Android Emulator and Run Tests
+        continue-on-error: true
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: ${{ matrix.api-level }}
+          target: ${{ matrix.target }}
+          arch: ${{ matrix.arch }}
+          disable-animations: true
+          ram-size: 1536M
+          script: |
+            adb wait-for-device
+            adb shell input keyevent 82
+            adb devices
+            echo "Emulator is ready"
+
+            adb install ./${{ env.APP_NAME }}.apk
+            echo "APK installed"
+
+            echo "Running Maestro tests"
+            maestro test .maestro --format=junit --output=android-report-${{ matrix.api-level }}.xml
+            echo "Maestro tests completed"
+
+      - name: Add API level to JUnit report
+        run: |
+          file="android-report-${{ matrix.api-level }}.xml"
+          api="api-${{ matrix.api-level }}"
+
+          if [ ! -f "$file" ]; then
+            echo "Report file '$file' not found."
+            exit 0
+          fi
+
+          sudo apt-get update && sudo apt-get install -y xmlstarlet
+
+          # Add API level in <testsuite name="...">
+          xmlstarlet ed -P -L \
+          -u "//testsuite/@name" \
+          -v "Android (${api})" \
+          "$file"
+
+          # Add API level in <testcase classname="...">
+          xmlstarlet ed -P -L \
+          -u "//testcase/@classname" \
+          -x "concat(., ' (${api})')" \
+          "$file"
+
+          # Check changes
+          echo "Updated XML report:"
+          cat "$file"
+
+      - name: Upload Maestro Test Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-report-${{ matrix.api-level }}
+          path: android-report-${{ matrix.api-level }}.xml
+          retention-days: 1
+
+  generate-report:
+    needs: [test-android, test-ios]
+    if: always()
+    name: Generate HTML Report
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Android Test Reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: android-report-*
+          path: ./maestro-reports
+          merge-multiple: true
+
+      - name: Download iOS Test Reports
+        uses: actions/download-artifact@v4
+        with:
+          pattern: ios-report-*
+          path: ./maestro-reports
+          merge-multiple: true
+
+      - name: List downloaded reports
+        run: ls -la ./maestro-reports
+
+      - name: Merge JUnit reports
+        run: |
+          npx junit-report-merger merged.xml "./maestro-reports/*.xml"
+
+      - name: Generate HTML report
+        run: |
+          npm install -g xunit-viewer
+          xunit-viewer --results=merged.xml --output=mobile-tests-report.html -title "Maestro Android Tests"
+
+      - name: Upload Merged Maestro Test Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: mobile-tests-report
+          path: mobile-tests-report.html
+
+#  deploy-report:
+#    runs-on: ubuntu-latest
+#    name: Deploy Report
+#    needs: [generate-report]
+#    if: always()
+#    steps:
+#      - name: "Checkout code"
+#        uses: actions/checkout@v3
+#
+#      - name: "Deploy Report to S3"
+#        uses: ./.github/actions/deploy-report
+#        with:
+#          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+#          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+#          s3-bucket-path: ${{ env.S3_BUCKET_PATH }}
+#          artifact-prefix: mobile-tests-report

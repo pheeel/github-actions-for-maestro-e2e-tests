@@ -1,0 +1,77 @@
+name: "Deploy HTML Report to AWS S3"
+description: 'Setups and deploys HTML test reports to AWS S3'
+inputs:
+  aws-access-key-id:
+    description: 'AWS Access Key ID'
+    required: true
+  aws-secret-access-key:
+    description: 'AWS Secret Access Key'
+    required: true
+  s3-bucket-path:
+    description: 'S3 Bucket path'
+    required: true
+  artifact-prefix:
+    description: 'Artifact prefix'
+    required: true
+  s3-bucket:
+    description: 'S3 Bucket'
+    default: 's3://BUCKET_LINK/' # update bucket link
+  s3-bucket-url:
+    description: 'S3 Bucket URL'
+    default: 'https://BUCKET_LINK/' # update bucket link
+  aws-region:
+    description: 'AWS Region'
+    default: 'us-east-1'
+  node-version:
+    description: 'Node version'
+    default: '20'
+  java-version:
+    description: 'Java JDK version'
+    default: '11'
+
+runs:
+  using: "composite"
+  steps:
+    - name: "Checkout the code"
+      uses: actions/checkout@v3
+
+    - name: "Setup the node env"
+      uses: actions/setup-node@v3
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: "Install AWS CLI"
+      uses: unfor19/install-aws-cli-action@v1
+
+    - name: "Set up JDK 11"
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: 'adopt'
+
+    - name: "Configure AWS Credentials"
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ inputs.aws-access-key-id }}
+        aws-secret-access-key: ${{ inputs.aws-secret-access-key }}
+        aws-region: ${{ inputs.aws-region }}
+
+    - name: "Download all HTML artifacts"
+      uses: actions/download-artifact@v4
+      with:
+        path: html-reports
+        pattern: ${{ inputs.artifact-prefix }}
+        merge-multiple: true
+
+    - name: "S3 Deploy HTML Report"
+      run: aws s3 cp --recursive ./html-reports ${{ inputs.s3-bucket }}${{ inputs.s3-bucket-path }}/${{ github.run_number }}
+      shell: bash
+
+    - name: "Set HTML Report links in summary"
+      run: |
+        echo "### Test Reports" >> $GITHUB_STEP_SUMMARY
+        for file in $(find ./html-reports -name '*.html'); do
+          filename=$(basename "$file")
+          echo "- [$filename](${{ inputs.s3-bucket-url }}${{ inputs.s3-bucket-path }}/${{ github.run_number }}/$filename)" >> $GITHUB_STEP_SUMMARY
+        done
+      shell: bash
